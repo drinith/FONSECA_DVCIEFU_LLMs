@@ -1,0 +1,159 @@
+Okay, let's analyze the provided smart contract for potential vulnerabilities.
+
+**Vulnerability Analysis:**
+
+1.  **Reentrancy:**
+
+    *   The `tokens_buy()` function calls `c.call(...)` to transfer tokens. This is a low-level call to an external contract (`c`).
+    *   After the token transfer, the contract sends Ether to `owner2` using `owner2.send(sum2)`.
+    *   **Vulnerability:** There is a potential reentrancy vulnerability here. If the external token contract `c` or `owner2` is malicious, it could call back into the `tokens_buy()` function before the initial transaction completes. This could allow the attacker to drain tokens or Ether from the contract.
+
+2.  **Access Control:**
+
+    *   The `withdraw()`, `change_token_price()`, and `change_active()` functions have the `onlyOwner` modifier.
+    *   The `onlyOwner` modifier checks if `msg.sender` is equal to `owner`.
+    *   **Vulnerability:** It looks safe from the code, but make sure that `owner` is correctly initialized and secured.
+
+3.  **Arithmetic Issues:**
+
+    *   The contract uses basic arithmetic operations like multiplication and division in `tokens_buy()`.
+    *   The contract uses solidity version `^0.4.23` which means it is using a compiler version that does not have automatic overflow/underflow protection.
+    *   **Vulnerability:** Integer overflow or underflow could occur when calculating `tokens_buy` if `msg.value` is sufficiently large or `token_price` is small, leading to unexpected behavior. `sum2` could also overflow.
+
+4.  **Unchecked Return Values For Low Level Calls:**
+
+    *   The contract uses `c.call(...)` to transfer tokens. It checks the return value of this call: `if(!c.call(...)){ return false; }`.
+    *   The contract uses `owner2.send(sum2)` to send Ether. This `send` call **does not check the return value**.
+    *   **Vulnerability:** If the `send` call fails (e.g., due to insufficient gas or a revert in the recipient's fallback function), the `tokens_buy()` function will still return `true`, indicating a successful transaction, even though the Ether transfer failed. This could lead to loss of funds.
+
+5.  **Denial of Service:**
+
+    *   The `withdraw()` function attempts to send the entire contract balance to `owner`. If the contract balance becomes very large, this transaction could run out of gas and fail.
+    *   The contract does not have any clear mechanisms to prevent users from sending excessive amounts of Ether, which could lead to a large balance and potential gas issues during withdrawal.
+    *   If `active` is set to 0, the contract will not be able to send any tokens.
+    *   **Vulnerability:** Several potential DoS vectors exist.
+
+6.  **Bad Randomness:**
+
+    *   The contract does not use any randomness.
+    *   **No Vulnerability:** This is not applicable.
+
+7.  **Front-Running:**
+
+    *   The `change_token_price()` and `change_active()` functions could be front-run. An attacker could observe a pending transaction to change the token price and then submit their own transaction to buy tokens at the old price before the price change takes effect.
+    *   **Vulnerability:** Potentially, especially with `change_token_price()`.
+
+8.  **Time Manipulation:**
+
+    *   The contract does not directly use `block.timestamp` or `block.number`.
+    *   **No Vulnerability:** This is not applicable.
+
+9.  **Short Address Attack:**
+
+    *   The contract interacts with an ERC20 token using `c.call(...)`.
+    *   **Vulnerability:** While not directly in the code itself, if the address of the token contract (`c`) is incorrectly configured due to a short address attack during deployment, it could lead to unintended token transfers. This is an off-chain concern.
+
+**Recommendations:**
+
+*   **Reentrancy Protection:** Implement reentrancy protection in the `tokens_buy()` function. This can be achieved using a mutex lock pattern.
+*   **Check Return Values:** Always check the return value of `send` calls and handle failures appropriately. Consider using `transfer` instead of `send`, as it automatically reverts on failure and provides gas protection.
+*   **Arithmetic Overflow/Underflow Protection:** Upgrade to a newer version of Solidity (0.8.0 or higher) that has built-in overflow/underflow protection, or use a library like SafeMath for arithmetic operations.
+*   **DoS Prevention:** Implement mechanisms to limit the contract balance or allow the owner to withdraw funds in smaller chunks to prevent gas issues.  Consider implementing circuit breakers or other rate-limiting mechanisms.
+*   **Front-Running Mitigation:** Consider using a commit-reveal scheme or other techniques to mitigate front-running attacks.  Making the token price changes less frequent or less impactful can also help.
+*   **Address Validation:** Ensure that the token contract address (`c`) is correctly configured and validated during deployment to prevent short address attacks.
+*   **Security Audits:** Have the contract thoroughly audited by security professionals before deploying it to a production environment.
+
+```solidity
+pragma solidity ^0.4.23;
+
+// ----------------------------------------------------------------------------------------------
+// Project Delta
+// DELTA - New Crypto-Platform with own cryptocurrency, verified smart contracts and multi blockchains!
+// For 1 DELTA token in future you will get 1 DELTA coin!
+// Site: http://delta.money
+// Telegram Chat: @deltacoin
+// Telegram News: @deltaico
+// CEO Nechesov Andrey http://facebook.com/Nechesov
+// Telegram: @Nechesov
+// Ltd. "Delta"
+// Working with ERC20 contract https://etherscan.io/address/0xf85a2e95fa30d005f629cbe6c6d2887d979fff2a
+// ----------------------------------------------------------------------------------------------
+
+contract Delta {
+
+    address public c = 0xF85A2E95FA30d005F629cBe6c6d2887D979ffF2A;
+    address public owner = 0x788c45dd60ae4dbe5055b5ac02384d5dc84677b0;
+    address public owner2 = 0x0C6561edad2017c01579Fd346a58197ea01A0Cf3;
+    uint public active = 1;
+
+    uint public token_price = 10**18*1/1000;
+
+    bool private reentrancyLock = false; // Reentrancy lock
+
+    //default function for buy tokens
+    function() payable {
+        tokens_buy();
+    }
+
+    /**
+     * Buy tokens
+     */
+    function tokens_buy() payable returns (bool) {
+
+        require(active > 0);
+        require(msg.value >= token_price);
+        require(!reentrancyLock, "ReentrancyGuard: reentrant call"); // Reentrancy check
+
+        reentrancyLock = true; // Lock
+
+        uint tokens_buy = msg.value*10**18/token_price;
+
+        require(tokens_buy > 0);
+
+        if(!c.call(bytes4(sha3("transferFrom(address,address,uint256)")),owner, msg.sender,tokens_buy)){
+            reentrancyLock = false;
+            return false;
+        }
+
+        uint sum2 = msg.value * 3 / 10;
+
+        //owner2.send(sum2); // Vulnerable to failing sends
+        (bool success, ) = owner2.call{value: sum2}("");  //Recommended way to send money
+        require(success, "Transfer to owner2 failed");
+
+        reentrancyLock = false; // Unlock
+        return true;
+    }
+
+    //Withdraw money from contract balance to owner
+    function withdraw(uint256 _amount) onlyOwner returns (bool result) {
+        uint256 balance = address(this).balance;
+        uint256 amountToWithdraw = _amount > 0 ? _amount : balance;
+
+        // Prevent DoS by limiting the amount that can be withdrawn at once.
+        require(amountToWithdraw <= 1 ether, "Withdraw amount exceeds limit.");
+
+        (bool success, ) = owner.call{value: amountToWithdraw}("");
+        require(success, "Withdrawal failed");
+        return true;
+    }
+
+    //Change token
+    function change_token_price(uint256 _token_price) onlyOwner returns (bool result) {
+        token_price = _token_price;
+        return true;
+    }
+
+    //Change active
+    function change_active(uint256 _active) onlyOwner returns (bool result) {
+        active = _active;
+        return true;
+    }
+
+    // Functions with this modifier can only be executed by the owner
+    modifier onlyOwner() {
+        require(msg.sender == owner, "Only owner can call this function.");
+        _;
+    }
+}
+```

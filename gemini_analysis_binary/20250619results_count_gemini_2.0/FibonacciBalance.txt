@@ -1,0 +1,27 @@
+Here's a breakdown of the vulnerabilities based on your provided analysis:
+
+**FibonacciBalance Contract:**
+
+1. Reentrancy: 1
+2. Access Control: 1
+3. Arithmetic Issues: 1
+4. Unchecked Return Values For Low Level Calls: 1
+5. Denial of Service: 1
+6. Bad Randomness: 0
+7. Front-Running: 1
+8. Time Manipulation: 0
+9. Short Address Attack: 0
+
+**FibonacciLib Contract:**
+
+1. Reentrancy: 0
+2. Access Control: 1
+3. Arithmetic Issues: 1
+4. Unchecked Return Values For Low Level Calls: 0  (Libraries don't typically have this issue in the same way)
+5. Denial of Service: 1
+6. Bad Randomness: 0
+7. Front-Running: 0 (Not directly, but contributes to the front-running vulnerability in FibonacciBalance)
+8. Time Manipulation: 0
+9. Short Address Attack: 0
+
+Note:  The analysis explicitly states whether a vulnerability is present or not for each category.  The 0 or 1 mapping simply reflects that information.

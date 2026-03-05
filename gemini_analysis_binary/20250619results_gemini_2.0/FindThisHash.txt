@@ -1,0 +1,92 @@
+Okay, let's analyze this smart contract for potential vulnerabilities. We'll go through each of the nine categories I have in mind.
+
+**Contract Code:**
+
+```solidity
+pragma solidity ^0.4.22;
+
+contract FindThisHash {
+    bytes32 constant public hash = 0xb5b5b97fafd9855eec9b41f74dfb6c38f5951141f9a3ecd7f44d5479b630ee0a;
+
+    constructor() public payable {} // load with ether
+
+    function solve(string solution) public {
+        // If you can find the pre image of the hash, receive 1000 ether
+
+        require(hash == sha3(solution));
+        msg.sender.transfer(1000 ether);
+    }
+}
+```
+
+**Vulnerability Analysis:**
+
+1.  **Reentrancy:**
+
+    *   The `solve` function calls `msg.sender.transfer(1000 ether)`. This is a direct call to an external address, making the contract vulnerable to reentrancy. A malicious contract could call `solve` with the correct solution. When the `transfer` function is called, the malicious contract's fallback function would be triggered. Inside the fallback function, the malicious contract could call `solve` again *before* the original `transfer` call completes. If the contract's balance is sufficient, the malicious contract could potentially drain all the ether.
+
+2.  **Access Control:**
+
+    *   There are no explicit access control mechanisms in this contract. The `solve` function is `public`, meaning anyone can call it. While this is intended for the puzzle, it's worth noting that there's no restriction on *who* can solve it.
+
+3.  **Arithmetic Issues:**
+
+    *   There are no explicit arithmetic operations that could lead to overflow or underflow issues. The `transfer` function handles the arithmetic internally, and Solidity 0.4.22 has built-in overflow protection for `transfer` and other related functions.
+
+4.  **Unchecked Return Values For Low Level Calls:**
+
+    *   The contract *uses* `transfer`, which reverts on failure. Therefore this specific low level call is checked.
+
+5.  **Denial of Service:**
+
+    *   **Gas Limit:** The `solve` function has a `require` statement and a `transfer` call. If the contract balance is insufficient to transfer `1000 ether`, the `transfer` function will revert, effectively causing a denial of service. The contract becomes unusable because no one can successfully call `solve` even if they provide the correct solution.
+    *   **Unexpected Throw/Kill:** There are no `throw` or `kill` (or `selfdestruct`) statements that could be maliciously triggered to halt the contract.
+    *   **Access Breach:** N/A
+
+6.  **Bad Randomness:**
+
+    *   This contract does not use any randomness.
+
+7.  **Front-Running:**
+
+    *   The `solve` function *could* theoretically be vulnerable to front-running, although it's unlikely to be exploitable in practice. An attacker could observe a transaction calling `solve` with the correct solution in the mempool and submit their own transaction with the same solution but a higher gas price. The attacker's transaction would then be executed first, and they would receive the reward. However, given the difficulty of finding the correct solution, the opportunity for front-running is probably minimal.
+
+8.  **Time Manipulation:**
+
+    *   This contract does not rely on `block.timestamp` or any other time-dependent factors.
+
+9.  **Short Address Attack:**
+
+    *   The contract does not directly take any address as input. The `msg.sender` is used, which is provided by the EVM and isn't vulnerable to short address attacks.
+
+**Summary of Vulnerabilities:**
+
+*   **Reentrancy:** **Present**. The `transfer` call in `solve` allows reentrancy.
+*   **Denial of Service:** **Present.** If contract balance is < 1000 Ether, the contract can no longer pay out reward, and is DoS'd.
+*   **Front-Running:** **Potentially Present**, but unlikely exploitable.
+
+**Recommendations:**
+
+*   **Implement Reentrancy Protection:** The most critical vulnerability is reentrancy. Use the "Checks-Effects-Interactions" pattern.  Update the contract's state to indicate that the reward has been claimed *before* transferring the ether. Consider using a mutex lock to prevent reentrant calls.
+
+    ```solidity
+    pragma solidity ^0.4.22;
+
+    contract FindThisHash {
+        bytes32 constant public hash = 0xb5b5b97fafd9855eec9b41f74dfb6c38f5951141f9a3ecd7f44d5479b630ee0a;
+        bool public solved = false;
+
+        constructor() public payable {} // load with ether
+
+        function solve(string solution) public {
+            require(!solved, "Contract has already been solved");
+            require(hash == sha3(solution));
+            solved = true;
+            msg.sender.transfer(1000 ether);
+        }
+    }
+    ```
+
+*   **Check contract Balance before paying reward**. Add a check to ensure that the contract holds sufficient funds before transferring the reward.
+
+By addressing these issues, the security of the `FindThisHash` contract can be significantly improved.

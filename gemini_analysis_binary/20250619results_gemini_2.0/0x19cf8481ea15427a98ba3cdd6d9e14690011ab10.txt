@@ -1,0 +1,79 @@
+Okay, let's analyze this smart contract for the listed vulnerabilities.
+
+**General Observations:**
+
+*   **Solidity Version:** The contract uses `pragma solidity ^0.4.11;`, which is quite old.  It's recommended to use a more recent version of Solidity (e.g., 0.8.x) to benefit from security improvements and language features that prevent certain vulnerabilities.
+*   **SafeMath:** The contract uses a `SafeMath` library, which is good for preventing integer overflow/underflow in older Solidity versions.
+*   **ERC20 Compliance:** It attempts to implement the ERC20 standard, but there are inconsistencies and potential issues.
+
+**Vulnerability Analysis:**
+
+1.  **Reentrancy:**
+
+    *   `refundTRA()`: This function contains a `msg.sender.transfer(ETHValue)` call *after* updating the `balancesRAW[msg.sender]` and `totalSupply`.  This is a classic reentrancy vulnerability. A malicious contract can call `refundTRA()` and, in its fallback function, call `refundTRA()` again *before* the original call completes.  This could allow the attacker to withdraw more ETH than they are entitled to.
+    *   `approveAndCall()`: This function calls an external contract (`spender.receiveApproval`).  A malicious contract could re-enter the `daoPOLSKAtokens` contract from within `receiveApproval`. The contract doesn't appear to have any reentrancy guards.
+
+2.  **Access Control:**
+
+    *   Many functions are restricted to the `owner` or `migrationMaster` using `if (msg.sender != owner) throw;`.  While this provides basic access control, it's crucial to ensure the `owner` and `migrationMaster` are carefully managed addresses. The contract should consider using more robust access control patterns, like OpenZeppelin's Ownable contract.
+    *   `turnmigrate()`: The check `if (msg.sender != migrationMaster) throw;` in the `turnmigrate` function is flawed. If `migratestate` is already `true` or `false`, `turnmigrate` will flip its value. Should an attacker call this function at the correct time, they can flip the value of `migratestate`, gaining the ability to perform migrations at will.
+    *   `PartialFundsTransfer(uint SubX)`: This function allows the `owner` to withdraw almost all the contract's balance to an arbitrary address. If `SubX` is small, the `owner` can drain the contract.
+
+3.  **Arithmetic Issues:**
+
+    *   The `SafeMath` library is used, which mitigates overflow/underflow risks in `transfer`, `transferFrom`, `burn`, and `burnFrom` within `StandardToken`.  However, the core `daoPOLSKAtokens` contract *does not use SafeMath*.
+    *   `createDaoPOLSKAtokens()`: The line `var numTokens = msg.value * CreationRate;` in the `createDaoPOLSKAtokens` function does not use the `SafeMath` library and could overflow if `msg.value` and `CreationRate` are large enough. This overflow can lead to the creation of fewer tokens than expected or even revert the transaction due to later checks.
+    *   `burn(uint256 _value)` and `burnFrom(address _from, uint256 _value)`: These functions in the `daoPOLSKAtokens` contract directly use `-=` on `balances[msg.sender]` and `balances[_from]` without `SafeMath`. This can lead to underflow if `_value` is greater than the respective balance. Similarly, `totalSupply -= _value` is also vulnerable.
+    *   `transfer(address _to, uint256 _value)` and `transferFrom(address _from, address _to, uint256 _value)`: Although the condition `balances[_to] + _value > balances[_to]` seems like a check for overflow, it isn't a reliable one.  The comparison will always evaluate to true since Solidity will wrap around `balances[_to] + _value` before the comparison occurs. Using `SafeMath.safeAdd` would be more effective.
+
+4.  **Unchecked Return Values For Low Level Calls:**
+
+    *   `FundsTransfer()`: The `owner.send(this.balance)` call does not check the return value. If the send fails (e.g., due to the owner contract rejecting the transfer), the function will continue without error, and the funds will remain in the contract. This can result in a denial of service, where the owner is unable to withdraw the funds.
+    *   `PartialFundsTransfer(uint SubX)`: The `owner.send(this.balance - SubX)` call also doesn't check the return value.
+    *   `refundTRA()`: The `msg.sender.transfer(ETHValue)` call also doesn't check the return value.
+
+5.  **Denial of Service:**
+
+    *   `setChainsAddresses()`: Calling this function multiple times with the same `chainnumber` overwrites the address. If the owner accidentally sets the same chain address multiple times, it can lead to confusion or problems with other parts of the system that rely on these addresses.
+    *   `createDaoPOLSKAtokens()`: The `createDaoPOLSKAtokens()` function has a check: `if (msg.value > (supplylimit - totalSupply) / CreationRate) throw;`.  If `totalSupply` is close to `supplylimit`, the calculation `(supplylimit - totalSupply) / CreationRate` could result in a very small value. This might make it difficult for users to contribute, especially if `CreationRate` is high.
+    *   `sendTokenAw()`: This function iterates through `numTransfers++` in the `sendTokenAw` function, incrementing the number of transfers by one each time the function is called. No measures are in place to limit the size of the `numTransfers` array, and since it is only owner-accessible, an attacker who gains access to the owner could call the `sendTokenAw` function indefinitely, incrementing the number of transfers and eventually leading to a denial of service by exceeding the array's maximum size.
+
+6.  **Bad Randomness:**
+
+    *   There's no use of randomness in the contract, so this isn't an issue.
+
+7.  **Front-Running:**
+
+    *   `setBonusCreationRate()`: If the owner calls `setBonusCreationRate` and broadcasts the transaction, someone could front-run it. For example, someone could observe this transaction in the mempool and quickly call `createDaoPOLSKAtokens` before the `setBonusCreationRate` transaction is mined. This would allow them to buy tokens at the old (lower) rate.
+
+8.  **Time Manipulation:**
+
+    *   `finalize()`: The `finalize` function depends on `block.number` for determining when to close the funding. While block numbers are more resistant to manipulation than timestamps, they can still be influenced to a small degree by miners. Using a large enough window reduces this risk, but it's worth noting.
+
+9.  **Short Address Attack:**
+
+    *   The contract uses a `StandardToken` contract, which inherits the `approve` function from `StandardToken`. The `StandardToken` attempts to mitigate the "approve() race condition" described in EIP-20. However, it does *not* appear to have explicit protection against short address attacks.
+    *   The contract could be vulnerable to a short address attack if any functions accept an address as input without properly validating its length. This is especially relevant for tokens with a high number of decimals.
+
+**Additional Notes and Recommendations:**
+
+*   **Update Solidity:** Upgrade to a recent version of Solidity.
+*   **Use OpenZeppelin Contracts:** Leverage the OpenZeppelin contracts library.  It provides well-audited, secure implementations of ERC20 tokens, access control, and SafeMath.
+*   **Input Validation:** Thoroughly validate all input parameters to prevent unexpected behavior.
+*   **Events:** Use events more consistently to provide a clear audit trail of all actions performed on the contract.
+*   **Code Clarity:** Improve code readability with clear comments and consistent naming conventions.
+*   **Testing:** Write comprehensive unit and integration tests to thoroughly test the contract's functionality and security.
+*   **Formal Verification:** Consider using formal verification tools to mathematically prove the correctness and security of the contract.
+*   **Security Audit:** Before deploying to mainnet, have the contract professionally audited by a reputable security firm.
+
+**Summary of Vulnerabilities:**
+
+*   **High:** Reentrancy vulnerability in `refundTRA()`.
+*   **High:** Potential integer overflows in `createDaoPOLSKAtokens()` and lack of SafeMath in `burn()` and `burnFrom()`.
+*   **Medium:** Unchecked return values in `owner.send()` calls.
+*   **Medium:** Access control issues in `turnmigrate` function.
+*   **Low:** Front-running potential with `setBonusCreationRate()`.
+*   **Low:** Potential denial of service with `setChainsAddresses` and `createDaoPOLSKAtokens` and `sendTokenAw`.
+*   **Low:** Possible short address attack vulnerability if not properly addressed in `StandardToken`.
+
+This analysis highlights several critical vulnerabilities that must be addressed before deploying this contract. Using more secure coding practices, updated Solidity versions, and external libraries like OpenZeppelin can significantly improve the contract's security.

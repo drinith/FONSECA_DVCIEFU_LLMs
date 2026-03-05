@@ -1,0 +1,63 @@
+Okay, let's analyze the smart contract for potential vulnerabilities, step by step.
+
+**Contract: `DEP_BANK`**
+
+1.  **Reentrancy:** The `Collect` function uses `msg.sender.call.value(_am)()`. This is a low-level call that forwards gas and allows the recipient to execute code. If the recipient is a malicious contract, it can call back into the `Collect` function before the `balances[msg.sender]-=_am;` line is executed. This can lead to the attacker withdrawing more funds than they are entitled to.
+
+2.  **Access Control:** The functions `SetMinSum`, `SetLogFile`, and `Initialized` lack access control. Anyone can call these functions before `intitalized` is set to `true`. This could lead to an attacker setting a very low `MinSum` or changing the `LogFile` contract address to a malicious one.
+
+3.  **Arithmetic Issues:** There are no explicit checks for integer overflow or underflow in `balances[msg.sender]+= msg.value;` or `balances[msg.sender]-=_am;`. While Solidity 0.8.0 and later have built-in overflow/underflow protection, this contract uses Solidity 0.4.19, which is vulnerable. An attacker could potentially overflow `balances[msg.sender]` or underflow it by withdrawing too much money.
+
+4.  **Unchecked Return Values For Low Level Calls:** The `Collect` function checks the return value of `msg.sender.call.value(_am)()`. However, this check only verifies that the call didn't revert. It doesn't guarantee that the recipient actually received the funds. The recipient could be a contract that throws an exception after receiving the funds, effectively burning the funds.
+
+5.  **Denial of Service:**
+    *   The `Collect` function could potentially be used for a gas limit DoS. If `_am` is close to the entire balance, the call to `msg.sender` may consume a lot of gas. If the receiver is an external contract that burns all gas it recieves, it could be used to DoS the `DEP_BANK` contract by preventing the update of the `balances` mapping, effectively halting the collect function.
+    *   An attacker can send a large amount of ether to the fallback function `function() payable` which calls `Deposit()`. This increases the `balances` mapping. If enough people send ether to this contract, this mapping could grow without bound, making it consume substantial gas, potentially DoSing the contract and rendering it unusable.
+
+6.  **Bad Randomness:** There is no usage of randomness in this contract.
+
+7.  **Front-Running:** There may be front-running opportunities if the `MinSum` value can be changed. An attacker can watch the mempool for a transaction that sets `MinSum` to a higher value and then submit a transaction with a higher gas price that sets `MinSum` to a lower value before the original transaction is executed. However, setting MinSum requires `intitalized` to be false, so this can only occur before the initialization.
+
+8.  **Time Manipulation:** The `LogFile` contract uses `now` (block timestamp). This is potentially problematic, as miners have some control over the timestamp. Although its use is only for logging, it can influence off-chain analysis of the logs.
+
+9.  **Short Address Attack:** The contract uses `msg.value` and `msg.sender`, which are not vulnerable to short address attacks.
+
+**Contract: `LogFile`**
+
+*   The `AddMessage` function stores the `LastMsg` to the `History` array. Since `LastMsg` is updated before pushing to `History`, every entry in `History` will contain the same data (that of the last message logged). This isn't a vulnerability, but is certainly unintended behavior.
+
+**Recommendations:**
+
+*   **Reentrancy:** Implement the Checks-Effects-Interactions pattern in the `Collect` function. Update the `balances` mapping *before* calling `msg.sender.call.value(_am)()`.
+*   **Access Control:** Add access control to the `SetMinSum`, `SetLogFile`, and `Initialized` functions. Typically, this would involve requiring that only the contract creator (or an authorized address) can call these functions.
+*   **Arithmetic Issues:** Use a library like SafeMath (or upgrade to Solidity 0.8.0 or later, which has built-in overflow/underflow protection) to prevent integer overflow and underflow in the `Deposit` and `Collect` functions.
+*   **Unchecked Return Values For Low Level Calls:** Consider emitting an event when the `msg.sender.call.value(_am)()` is successful. This would allow users to independently verify that the funds were sent. Also, consider adding further logic to handle the case where funds are not successfully sent.
+*   **Denial of Service:**
+    *   Implement a limit to the number of `Deposit` events allowed. Consider the amount of gas spent by `Collect`.
+*   **Time Manipulation:** Consider the implications of using `now` in the `LogFile` contract. If precise timestamps are critical, consider using a more reliable source of time (e.g., an oracle).
+*   **LogFile**: Fix the `AddMessage` function, create new Message structs to push in the array.
+
+**Revised Collect Function (Example - Showing Reentrancy Fix):**
+
+```solidity
+function Collect(uint _am)
+    public
+    payable
+    {
+        if(balances[msg.sender]>=MinSum && balances[msg.sender]>=_am)
+        {
+            // Update balance *before* sending
+            balances[msg.sender]-=_am;
+            if(msg.sender.call.value(_am)())
+            {
+                Log.AddMessage(msg.sender,_am,"Collect");
+            } else {
+              // Revert state changes if transfer fails.  This also informs the sender
+              // that the collect failed, allowing them to try again.
+              balances[msg.sender] += _am;
+            }
+        }
+    }
+```
+
+This revised function updates the balance *before* sending the funds, preventing reentrancy attacks. It also reverts the balance change if the send fails, ensuring that the state is consistent.
