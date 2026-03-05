@@ -1,4 +1,5 @@
 import os
+from dotenv import load_dotenv
 import time
 import re
 import google.generativeai as genai
@@ -8,7 +9,17 @@ import func_timeout
 # ======================
 # Configurações fixas
 # ======================
-API_KEY = 'AIzaSyACf5Vj7PpjNhKnTngs40U3wmZ-PYhBw9w'
+
+# Carrega as variáveis do arquivo .env para o ambiente do sistema
+load_dotenv()
+
+# Busca a chave usando o nome definido no .env
+api_key = os.environ.get("GOOGLE_API_KEY")
+
+if not api_key:
+    raise ValueError("Erro: GOOGLE_API_KEY não encontrada no arquivo .env")
+
+API_KEY = api_key
 MODEL_NAME = 'gemini-1.5-flash'
 TIMEOUT_SECONDS = 100
 RATE_LIMIT_DELAY = 60   # fallback se não achar retry_delay

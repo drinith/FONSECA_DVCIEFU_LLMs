@@ -1,10 +1,20 @@
 import os
+from dotenv import load_dotenv
 import google.generativeai as genai
 from func_timeout import func_set_timeout
 import func_timeout
 
-# Configure sua API KEY do Google
-genai.configure(api_key='AIzaSyBy0gEaqF_oNuy3urFduKBJHk6qouyApxU')
+
+# Carrega as variáveis do arquivo .env para o ambiente do sistema
+load_dotenv()
+
+# Busca a chave usando o nome definido no .env
+api_key = os.environ.get("GOOGLE_API_KEY")
+
+if not api_key:
+    raise ValueError("Erro: GOOGLE_API_KEY não encontrada no arquivo .env")
+
+genai.configure(api_key=api_key)
 
 # Cria o modelo
 model = genai.GenerativeModel('gemini-2.0-flash')
