@@ -1,9 +1,0 @@
-Reentrancy: 1
-Access Control: 0
-Arithmetic Issues: 0
-Unchecked Return Values For Low Level Calls: 0
-Denial of Service: 1
-Bad Randomness: 1
-Front-Running: 1
-Time Manipulation: 1
-Short Address Attack: 0

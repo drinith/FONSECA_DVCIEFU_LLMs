@@ -1,0 +1,131 @@
+As a vulnerability detector, I will analyze the `ModifierEntrancy` smart contract step by step for each of the nine common vulnerabilities.
+
+---
+
+### Contract Analysis: `ModifierEntrancy`
+
+```solidity
+pragma solidity ^0.4.24;
+
+contract ModifierEntrancy {
+  mapping (address => uint) public tokenBalance;
+  string constant name = "Nu Token";
+
+  function airDrop() hasNoBalance supportsToken  public{
+    tokenBalance[msg.sender] += 20; // State update happens LAST
+  }
+
+  // Checks that the contract responds the way we want
+  modifier supportsToken() {
+    // External call to msg.sender.supportsToken() happens BEFORE state update
+    require(keccak256(abi.encodePacked("Nu Token")) == Bank(msg.sender).supportsToken());
+    _;
+  }
+
+  // Checks that the caller has a zero balance
+  modifier hasNoBalance {
+      require(tokenBalance[msg.sender] == 0); // Balance check happens FIRST
+      _;
+  }
+}
+
+contract Bank{
+    function supportsToken() external pure returns(bytes32){
+        return(keccak256(abi.encodePacked("Nu Token")));
+    }
+}
+
+contract attack{ //An example of a contract that breaks the contract above.
+    bool hasBeenCalled;
+    function supportsToken() external returns(bytes32){
+        if(!hasBeenCalled){
+            hasBeenCalled = true;
+            ModifierEntrancy(msg.sender).airDrop(); // Re-entrant call here!
+        }
+        return(keccak256(abi.encodePacked("Nu Token")));
+    }
+    function call(address token) public{
+        ModifierEntrancy(token).airDrop();
+    }
+}
+```
+
+---
+
+### Vulnerability Check:
+
+1.  **Reentrancy: race to empty, recursive call, call to the unknown**
+
+    *   **Analysis:** The `airDrop` function uses two modifiers: `hasNoBalance` and `supportsToken`. The order of execution is: `hasNoBalance` -> `supportsToken` -> `airDrop` function body.
+        *   `hasNoBalance` checks `tokenBalance[msg.sender] == 0`.
+        *   `supportsToken` makes an **external call** to `Bank(msg.sender).supportsToken()`.
+        *   The actual state update `tokenBalance[msg.sender] += 20;` happens *after* the external call returns.
+    *   **Exploit Scenario (as demonstrated by `attack` contract):**
+        1.  An `attack` contract calls `ModifierEntrancy.airDrop()`.
+        2.  `ModifierEntrancy.airDrop()` executes `hasNoBalance`: `tokenBalance[attack_contract_address]` is 0, so it passes.
+        3.  `ModifierEntrancy.airDrop()` executes `supportsToken`: It calls `attack_contract_address.supportsToken()`.
+        4.  Inside `attack.supportsToken()`:
+            *   It checks `!hasBeenCalled` (which is true for the first call).
+            *   It sets `hasBeenCalled = true;`.
+            *   It makes a **re-entrant call**: `ModifierEntrancy(msg.sender).airDrop()`. At this point, `msg.sender` for the re-entrant call is `ModifierEntrancy` itself, so the `ModifierEntrancy` contract calls its own `airDrop` function on behalf of `attack_contract_address`.
+        5.  The re-entrant `airDrop` call executes:
+            *   `hasNoBalance` modifier: `tokenBalance[attack_contract_address]` is *still* 0 (because the initial `airDrop`'s state update hasn't happened yet). This check passes again.
+            *   `supportsToken` modifier: It calls `attack_contract_address.supportsToken()` again. This time, `hasBeenCalled` is true, so the re-entrant call doesn't recurse further. It simply returns the `keccak256` value. This check passes.
+            *   `airDrop` function body: `tokenBalance[attack_contract_address] += 20;`. The balance of the attacker contract becomes 20.
+        6.  The re-entrant call finishes and returns to the *original* `attack.supportsToken()`.
+        7.  `attack.supportsToken()` finishes and returns to the *original* `ModifierEntrancy.supportsToken()` modifier.
+        8.  The original `ModifierEntrancy.airDrop()` then proceeds to its function body: `tokenBalance[attack_contract_address] += 20;`. The balance of the attacker contract becomes 40.
+    *   **Conclusion:** **VULNERABLE.** This is a classic reentrancy attack. The state variable `tokenBalance[msg.sender]` is checked before an external call is made, and then updated only after the external call, allowing the attacker to re-enter and bypass the initial check for the second allocation. The `attack` contract perfectly demonstrates this.
+
+2.  **Access Control**
+
+    *   **Analysis:** The `airDrop` function is `public`. It intends to be callable by any address that meets the criteria defined by `hasNoBalance` and `supportsToken` modifiers. There are no `onlyOwner` or role-based access controls implied by the function's purpose ("airDrop"). The modifiers enforce conditions for eligibility, not exclusive access.
+    *   **Conclusion:** **NOT VULNERABLE** in the sense of unauthorized access. The issue is how authorized access is exploited (reentrancy), not a bypass of intended access restrictions.
+
+3.  **Arithmetic Issues: integer overflow/underflow**
+
+    *   **Analysis:** The only arithmetic operation is `tokenBalance[msg.sender] += 20;`. `tokenBalance` is a `uint`. For an overflow to occur, `tokenBalance[msg.sender]` would need to be `(2^256 - 1) - 19`. Given the initial `require(tokenBalance[msg.sender] == 0)` for the first call (and the reentrancy attack only doubles a small amount), reaching such a high value is practically impossible. No subtractions or divisions that could cause underflow or division-by-zero are present.
+    *   **Conclusion:** **NOT VULNERABLE.**
+
+4.  **Unchecked Return Values For Low Level Calls: silent failing sends**
+
+    *   **Analysis:** The contract makes an external call: `Bank(msg.sender).supportsToken()`. This is a direct function call to a known interface, not a low-level `call()`, `send()`, or `transfer()`. Crucially, its return value is explicitly checked against a `keccak256` hash using a `require` statement. If the call fails or returns an unexpected value, the `require` will revert the transaction.
+    *   **Conclusion:** **NOT VULNERABLE.** The return value is explicitly checked.
+
+5.  **Denial of Service: gas limit, unexpected throw/kill, access breach**
+
+    *   **Analysis:** The `supportsToken` modifier performs an external call to `msg.sender`.
+        *   **Malicious `supportsToken` Implementation:** A malicious contract could implement `supportsToken()` to consume excessive gas or revert unexpectedly. If it runs out of gas, the `airDrop` transaction would revert for that specific caller.
+        *   **Impact:** This would only deny service to the *malicious caller attempting to call `airDrop`*, preventing them from getting their tokens and wasting their gas. It does not prevent other legitimate users from calling `airDrop` (if they meet the criteria) nor does it brick the `ModifierEntrancy` contract itself.
+    *   **Conclusion:** **NOT VULNERABLE** in a significant way that impacts the entire contract or other users. It's a self-DoS mechanism for an attacker.
+
+6.  **Bad Randomness: nothing is secret**
+
+    *   **Analysis:** The contract does not use any source of randomness (e.g., `block.timestamp`, `block.difficulty`, `blockhash`).
+    *   **Conclusion:** **NOT VULNERABLE.**
+
+7.  **Front-Running: TOCTOU, race condition, TOD**
+
+    *   **Analysis:** The reentrancy vulnerability identified in point 1 is a classic example of a **Time-of-Check-Time-of-Use (TOCTOU) race condition**. The state `tokenBalance[msg.sender] == 0` is *checked* (TOC), but then an external call is made, allowing the attacker to *use* the stale state (`tokenBalance` still being zero) to re-enter the function and trigger another allocation *before* the original call's state update (`tokenBalance[msg.sender] += 20;`) occurs (TOU).
+    *   While not a typical transaction ordering dependence (TOD) front-running attack where a malicious user copies and pre-empts another user's transaction for profit, the core mechanism is a race condition where the timing of operations within a single transaction (or across carefully timed transactions) leads to an exploit.
+    *   **Conclusion:** **VULNERABLE (specifically, TOCTOU race condition leading to reentrancy).**
+
+8.  **Time Manipulation: timestamp dependence**
+
+    *   **Analysis:** The contract does not rely on `block.timestamp` (now) or `block.number` for any critical logic.
+    *   **Conclusion:** **NOT VULNERABLE.**
+
+9.  **Short Address Attack: off-chain issues, client vulnerabilities**
+
+    *   **Analysis:** This attack typically targets token transfer functions (`transfer(address _to, uint256 _amount)`) where a client might truncate the `_to` address.
+    *   The `airDrop()` function does not take any address parameters nor does it perform external token transfers. It updates an internal `mapping`.
+    *   **Conclusion:** **NOT VULNERABLE.**
+
+---
+
+### Summary of Vulnerabilities Found:
+
+1.  **Reentrancy:** **YES**
+2.  **Front-Running (specifically, TOCTOU race condition):** **YES** (This is directly linked to the Reentrancy vulnerability)
+
+The `ModifierEntrancy` contract is critically vulnerable to reentrancy, allowing an attacker to receive multiple token allocations in a single transaction by re-entering the `airDrop` function via the external call in the `supportsToken` modifier before the state (`tokenBalance`) is updated.

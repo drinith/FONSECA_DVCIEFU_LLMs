@@ -1,23 +1,45 @@
 import os
+import time
 from dotenv import load_dotenv
 import google.generativeai as genai
 from func_timeout import func_set_timeout
 import func_timeout
 
 
-# Carrega as variáveis do arquivo .env para o ambiente do sistema
+# =================================================================
+# 1. Configuração de Ambiente e Rotação de Chaves
+# =================================================================
 load_dotenv()
 
-# Busca a chave usando o nome definido no .env
-api_key = os.environ.get("GOOGLE_API_KEY")
+def carregar_chaves():
+    """Lê as chaves do .env (API_KEYS=k1,k2 ou GOOGLE_API_KEY=k1)."""
+    keys_str = os.getenv("API_KEYS", "")
+    lista_chaves = [k.strip() for k in keys_str.split(",") if k.strip()]
+    if not lista_chaves:
+        single_key = os.getenv("GOOGLE_API_KEY")
+        if single_key:
+            return [single_key]
+        raise EnvironmentError("❌ Nenhuma API_KEY encontrada no .env.")
+    return lista_chaves
 
-if not api_key:
-    raise ValueError("Erro: GOOGLE_API_KEY não encontrada no arquivo .env")
+API_KEYS = carregar_chaves()
+current_key_index = 0
+MODEL_NAME = 'gemini-2.5-flash'
+TIMEOUT_SECONDS = 100
+REQUEST_DELAY = 4  # Delay entre chamadas bem-sucedidas
 
-genai.configure(api_key=api_key)
+def configurar_gemini():
+    """Configura o modelo Gemini com a chave de API atual."""
+    global current_key_index, model
+    chave_atual = API_KEYS[current_key_index]
+    genai.configure(api_key=chave_atual)
+    model = genai.GenerativeModel(MODEL_NAME)
 
-# Cria o modelo
-model = genai.GenerativeModel('gemini-2.5-flash')
+configurar_gemini()
+
+# =================================================================
+# 2. Configurações de Diretório
+# =================================================================
 
 # Lista de arquivos já processados
 xx = os.listdir("./results_gemini_teste/")
@@ -25,6 +47,10 @@ xxx = [i[:-4] + '.sol' for i in xx]
 filenames = list(set(os.listdir("./smartbugs-curated/dataset/processed")) - set(xxx))
 position_file = 0
 error_cnt = 0
+
+# =================================================================
+# 3. Funções de Processamento
+# =================================================================
 
 def preprocess(text):
     l = [
@@ -43,20 +69,62 @@ def preprocess(text):
         text = text.replace(i, '')
     return text
 
-@func_set_timeout(100)
-def generate_answer(messages):
-    response = model.generate_content(messages)
+@func_set_timeout(TIMEOUT_SECONDS)
+def call_gemini_api(prompt: str) -> str:
+    """Chamada direta ao modelo."""
+    response = model.generate_content(prompt)
     return response.text.strip()
 
-# Loop pelos arquivos não processados
+def generate_answer(prompt: str) -> str:
+    """Gera resposta com lógica de rotação de chaves em caso de erro de cota ou chave inválida/expirada."""
+    global current_key_index
+
+    # Erros que indicam que a chave atual deve ser trocada
+    ROTATE_TRIGGERS = [
+        "429", "quota", "limit", "exhausted",   # cota esgotada
+        "api_key_invalid", "key expired", "invalid api key",  # chave inválida/expirada
+    ]
+
+    for tentativa in range(len(API_KEYS)):
+        try:
+            res = call_gemini_api(prompt)
+            return res
+        except func_timeout.exceptions.FunctionTimedOut:
+            print("⚠️ Timeout na chamada")
+            return None
+        except Exception as e:
+            msg = str(e).lower()
+            if any(x in msg for x in ROTATE_TRIGGERS):
+                proximo_index = (current_key_index + 1) % len(API_KEYS)
+                if proximo_index == current_key_index:
+                    # Só há uma chave — não adianta rotacionar
+                    print(f"❌ Chave inválida/expirada e não há outras chaves disponíveis.")
+                    return None
+                print(f"🔄 [CHAVE INVÁLIDA] Chave {current_key_index + 1} falhou ({str(e)[:60]}...). "
+                      f"Alternando para chave {proximo_index + 1}...")
+                time.sleep(5)  # Pausa curta — chave inválida não precisa de 20s
+                current_key_index = proximo_index
+                configurar_gemini()
+                continue
+            else:
+                print(f"❌ Erro inesperado na API: {e}")
+                return None
+
+    print("❌ Todas as chaves falharam.")
+    return None
+
+# =================================================================
+# 4. Loop principal
+# =================================================================
+
 while position_file < len(filenames):
     filename = filenames[position_file]
     print(filename)
-    
+
     try:
         with open("./smartbugs-curated/dataset/processed/" + filename, 'r', encoding='utf-8') as f:
             codes = f.read()
-        
+
         codes_processed = preprocess(codes)
 
         prompt = (
@@ -76,14 +144,17 @@ while position_file < len(filenames):
 
         res = generate_answer(prompt)
 
-    except func_timeout.exceptions.FunctionTimedOut:
-        print("timeout")
     except Exception as e:
         print("error:", e)
         position_file += 1
         continue
-    else:
+
+    if res:
         print("success, outputting...")
         with open('./results_gemini_teste/' + filename[:-4] + '.txt', 'w') as f:
             f.write(res)
-        position_file += 1
+        time.sleep(REQUEST_DELAY)  # Delay para respeitar o RPM da conta
+    else:
+        print(f"⚠️ Falha ao obter resposta para {filename}")
+
+    position_file += 1

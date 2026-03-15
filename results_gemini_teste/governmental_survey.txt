@@ -1,0 +1,171 @@
+Here's a step-by-step analysis of the `Governmental` smart contract for the nine common vulnerabilities, taking into account the `Attacker` contract's behavior:
+
+---
+
+### Contract: `Governmental`
+
+```solidity
+pragma solidity ^0.4.0;
+
+contract Governmental {
+  address public owner;
+  address public lastInvestor;
+  uint public jackpot = 1 ether;
+  uint public lastInvestmentTimestamp;
+  uint public ONE_MINUTE = 1 minutes;
+
+  function Governmental() {
+    owner = msg.sender;
+    if (msg.value<1 ether) throw;
+  }
+
+  function invest() {
+    if (msg.value<jackpot/2) throw;
+    lastInvestor = msg.sender;
+    jackpot += msg.value/2;
+    
+    lastInvestmentTimestamp = block.timestamp;
+  }
+
+  function resetInvestment() {
+    if (block.timestamp < lastInvestmentTimestamp+ONE_MINUTE)
+      throw;
+
+    lastInvestor.send(jackpot); // VULNERABLE
+    owner.send(this.balance-1 ether); // VULNERABLE
+
+    lastInvestor = 0;
+    jackpot = 1 ether;
+    lastInvestmentTimestamp = 0;
+  }
+}
+
+contract Attacker {
+  function attack(address target, uint count) {
+    if (0<=count && count<1023) {
+      this.attack.gas(msg.gas-2000)(target, count+1);
+    }
+    else {
+      Governmental(target).resetInvestment();
+    }
+  }
+}
+```
+
+---
+
+### Vulnerability Detection:
+
+#### 1. Reentrancy
+
+*   **Vulnerability Spot:** `resetInvestment()` function
+    *   `lastInvestor.send(jackpot);`
+    *   `owner.send(this.balance-1 ether);`
+    *   The crucial point is that the state variables (`lastInvestor`, `jackpot`, `lastInvestmentTimestamp`) are reset *after* these `send` calls. This is the classic "Checks-Effects-Interactions" pattern violation.
+*   **Analysis:** The `send()` function in Solidity has a 2300 gas stipend. This limited gas transfer significantly mitigates against *direct* reentrancy attacks where the recipient tries to call back into the same function (or other complex functions) within the same transaction. The `resetInvestment` function itself would likely cost more than 2300 gas.
+*   **Conclusion:** While the `send` calls occur before state updates, the `send` method's gas limit makes direct reentrancy into `resetInvestment` unlikely for a malicious contract. However, it's still a bad practice pattern (Interaction before Effects) and could expose other functions if they were low-gas and also vulnerable.
+*   **Severity:** Medium (due to `send`'s mitigation, but pattern is risky).
+
+#### 2. Access Control
+
+*   **Vulnerability Spot:** `resetInvestment()` function
+*   **Analysis:** This function can be called by *anyone* (`public` visibility, no `onlyOwner` or similar check).
+    *   The purpose of `resetInvestment()` is to distribute the `jackpot` to the `lastInvestor` and a share to the `owner`, then reset the contract for a new round.
+    *   **Attack Scenario (Griefing/DoS):** An attacker can make a small investment to become the `lastInvestor`, wait for `ONE_MINUTE` to pass, and then call `resetInvestment()`. This will pay the attacker the (potentially small) jackpot and reset the contract. This prevents the jackpot from growing to a significant amount, effectively sabotaging the contract's intended long-term functionality.
+*   **Conclusion:** High-severity access control flaw. Any user can trigger the main payout and reset mechanism, leading to a Denial of Service for the contract's primary purpose.
+*   **Severity:** High.
+
+#### 3. Arithmetic Issues: integer overflow/underflow
+
+*   **Vulnerability Spot 1:** `jackpot += msg.value/2;` in `invest()`
+*   **Analysis:** In Solidity 0.4.x, `uint` arithmetic does not automatically check for overflow. If `jackpot` were to reach `2^256 - 1` (the maximum `uint` value), adding any amount to it would cause it to wrap around to a very small number (e.g., 0). This would effectively "steal" all accumulated funds by resetting the jackpot to an inaccessible value. While reaching this maximum is practically unlikely on Ethereum mainnet due to gas costs and value limits, it's a theoretical vulnerability in the code version.
+*   **Severity:** Medium (Theoretical, but critical if exploited).
+
+*   **Vulnerability Spot 2:** `owner.send(this.balance-1 ether);` in `resetInvestment()`
+*   **Analysis:** Let's trace the contract balance.
+    1.  The constructor requires `msg.value >= 1 ether`. So `this.balance` starts at least at `1 ether`. `jackpot` starts at `1 ether`.
+    2.  When `invest()` is called, `msg.value` is added to `this.balance`, and `msg.value/2` is added to `jackpot`.
+    3.  When `resetInvestment()` is called:
+        *   `lastInvestor.send(jackpot)`: `this.balance` is reduced by the current `jackpot`.
+        *   The remaining `this.balance` at this point can be calculated as `(initial_constructor_funds + sum_of_all_investments) - current_jackpot`.
+        *   Given `initial_constructor_funds >= 1 ether` and `current_jackpot = 1 ether + sum_of_all_investments/2`,
+        *   The remaining balance is roughly `(initial_constructor_funds + sum_of_all_investments) - (1 ether + sum_of_all_investments/2)`
+        *   This simplifies to `(initial_constructor_funds - 1 ether) + sum_of_all_investments/2`.
+        *   If the contract was deployed with exactly `1 ether` (the minimum required), then `initial_constructor_funds - 1 ether = 0`.
+        *   So the remaining balance would be `sum_of_all_investments/2`.
+        *   Therefore, the line becomes `owner.send(sum_of_all_investments/2 - 1 ether);`
+        *   **Underflow:** If `sum_of_all_investments/2` is less than `1 ether`, this subtraction will underflow, resulting in a very large `uint` value. An attempt to `send` a very large amount from `this.balance` (which is `sum_of_all_investments/2`) will fail due to insufficient funds.
+*   **Conclusion:** High-severity underflow. This `send` will likely revert, causing the entire `resetInvestment` transaction to revert (Denial of Service), preventing `jackpot` distribution and state reset. The `owner` will not receive their intended "fee" if `sum_of_all_investments/2` is less than `1 ether`.
+*   **Severity:** High.
+
+#### 4. Unchecked Return Values For Low Level Calls: silent failing sends
+
+*   **Vulnerability Spot:**
+    *   `lastInvestor.send(jackpot);`
+    *   `owner.send(this.balance-1 ether);`
+*   **Analysis:** The `send()` function returns a boolean indicating whether the transfer was successful. This contract does not check this return value.
+*   **Impact:** If `lastInvestor` or `owner` is a contract that intentionally rejects Ether (e.g., no `fallback` or `receive` function, or a `fallback` that reverts), the `send` call will fail silently. The funds would remain in the `Governmental` contract, but the state variables (`lastInvestor`, `jackpot`, `lastInvestmentTimestamp`) would still be reset. This would lead to funds being locked in the contract, and the contract losing track of who should own them, effectively leading to irrecoverable loss for the intended recipients.
+*   **Conclusion:** High-severity unchecked return value, leading to potential fund loss and incorrect state.
+*   **Severity:** High.
+
+#### 5. Denial of Service: gas limit, unexpected throw/kill, access breach
+
+*   **Vulnerability Spot 1:** Access Control (revisited from point 2)
+*   **Analysis:** The lack of access control on `resetInvestment()` allows an attacker to repeatedly reset the contract's state after making minimal investments. This denies the contract's ability to accumulate a large jackpot, fulfilling its intended purpose.
+*   **Conclusion:** High-severity DoS via access breach.
+
+*   **Vulnerability Spot 2:** Arithmetic Underflow (revisited from point 3)
+*   **Analysis:** The underflow in `owner.send(this.balance - 1 ether)` will cause the `send` call to revert (due to insufficient contract balance to send a very large wrapped-around number). This will cause the entire `resetInvestment()` transaction to revert. This means `lastInvestor` cannot claim their jackpot, `owner` cannot get their share, and the contract state will not be reset. The contract will be stuck in a state where `resetInvestment()` cannot successfully execute until enough investments have occurred to prevent the underflow.
+*   **Conclusion:** High-severity DoS, blocking critical contract functionality.
+
+*   **`Attacker` contract behavior:** The `Attacker` contract repeatedly calls itself, eventually calling `Governmental(target).resetInvestment()`. If `resetInvestment()` is prone to DoS, the `Attacker` will also experience a reverted transaction, but its primary purpose here is to *trigger* the DoS in `Governmental`. The gas reduction `msg.gas-2000` could lead to underflow if `msg.gas` is too low, causing the `Attacker`'s own transaction to fail before it can reach the target, but that's a self-inflicted issue for the attacker.
+*   **Severity:** High.
+
+#### 6. Bad Randomness: nothing is secret
+
+*   **Analysis:** The contract does not use any form of random numbers.
+*   **Conclusion:** Not applicable.
+*   **Severity:** None.
+
+#### 7. Front-Running: TOCTOU, race condition, TOD
+
+*   **Vulnerability Spot 1:** `invest()` function
+*   **Analysis:** When a user sends a transaction to `invest()`, it enters the mempool. Another user (or an attacker) can observe this transaction and submit their own `invest()` transaction with a higher gas price. If this front-running transaction is mined first, the front-runner becomes the `lastInvestor` and influences the `jackpot` and `lastInvestmentTimestamp`.
+*   **Impact:** This can be used to hijack the position of `lastInvestor`, which is crucial for claiming the jackpot in `resetInvestment()`.
+*   **Conclusion:** Medium-severity front-running risk for becoming `lastInvestor`.
+
+*   **Vulnerability Spot 2:** `resetInvestment()` function
+*   **Analysis:** Due to the lack of access control, anyone can call `resetInvestment()`. If a `lastInvestor` intends to call it, they can be front-run by another party (who might also be the current `lastInvestor` or simply an attacker preventing them).
+*   **Impact:** The intended `lastInvestor` might lose the opportunity to claim the jackpot at their preferred time, or an attacker could maliciously trigger `resetInvestment` to reset the contract (as per DoS point).
+*   **Conclusion:** Medium-severity front-running risk due to open access.
+*   **Severity:** Medium.
+
+#### 8. Time Manipulation: timestamp dependence
+
+*   **Vulnerability Spot:**
+    *   `lastInvestmentTimestamp = block.timestamp;`
+    *   `if (block.timestamp < lastInvestmentTimestamp+ONE_MINUTE) throw;`
+*   **Analysis:** The contract relies on `block.timestamp` for the `ONE_MINUTE` delay. Miners have a limited ability to manipulate `block.timestamp` (usually within a few seconds, or potentially more on testnets/private chains).
+*   **Impact:** A malicious miner or one colluding with a `lastInvestor` could slightly advance the timestamp of a block to allow `resetInvestment()` to be called earlier than genuinely 1 minute, or delay it. For a 1-minute window, this manipulation might have minimal practical impact on mainnet, but it's a known vector for timestamp-dependent logic.
+*   **Conclusion:** Low-severity time manipulation risk.
+*   **Severity:** Low.
+
+#### 9. Short Address Attack: off-chain issues, client vulnerabilities
+
+*   **Analysis:** This vulnerability typically arises from clients not properly padding address parameters when interacting with the contract, especially when the address is the *last* parameter. This is a client-side issue, not usually a contract-side vulnerability unless the contract itself uses low-level `call` with unverified input length.
+*   The `Governmental` contract uses standard `address` types and `send` functions which are generally not directly susceptible to short address attacks if the interacting client uses proper ABI encoding. In Solidity 0.4.x, such vulnerabilities were more about how data was passed to external calls.
+*   **Conclusion:** No direct contract-side vulnerability identified. This would be a client-side concern.
+*   **Severity:** None.
+
+---
+
+### Overall Summary of Critical Vulnerabilities:
+
+*   **Access Control (High):** Anyone can call `resetInvestment()`, allowing attackers to repeatedly reset the contract and prevent it from fulfilling its purpose of accumulating a large jackpot.
+*   **Arithmetic Underflow (High):** The calculation `this.balance - 1 ether` in `resetInvestment()` will underflow if investment amounts are not high enough, causing the `owner.send()` call to revert and thus performing a Denial of Service on the entire `resetInvestment()` function.
+*   **Unchecked Return Values for Low-Level Calls (High):** Funds sent via `send()` to `lastInvestor` and `owner` can be lost if recipients fail to receive them, while the contract's state is still reset, leading to irreversible fund loss for the intended recipients.
+*   **Denial of Service (High):** Caused by both the access control issue (griefing attacks) and the arithmetic underflow (blocking payouts and resets).
+*   **Arithmetic Overflow (Medium):** Theoretical risk for `jackpot` due to `uint` arithmetic in Solidity 0.4.x.
+*   **Reentrancy (Medium):** While `send` offers mitigation, the Interaction-before-Effects pattern is present and risky if other low-gas functions or external calls were present.
+
+This contract has severe design flaws and implementation issues for a Solidity 0.4.x environment.
