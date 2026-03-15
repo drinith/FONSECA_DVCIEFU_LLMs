@@ -1,0 +1,73 @@
+Okay, let's analyze the provided smart contract code for potential vulnerabilities, step by step.
+
+**Contract: `Owned`**
+
+*   **Reentrancy:** The `execute` function uses `_dst.call.value(_value)(_data)`.  This is a low-level call, and it *does* forward all available gas. However, it is still susceptible to reentrancy if the contract at `_dst` calls back into the `Owned` contract (or any contract that relies on its state, like `Marriage`).  If the called contract maliciously calls back to `Marriage`, for example, it could potentially manipulate state variables before the original execution completes.
+*   **Access Control:** The `onlyOwner` modifier seems correctly implemented. The `changeOwner` and `acceptOwnership` functions follow a two-step ownership transfer, which is generally good practice.
+*   **Arithmetic Issues:**  No apparent arithmetic overflows or underflows.
+*   **Unchecked Return Values For Low Level Calls:** The `execute` function *does not* check the return value of the `_dst.call.value(_value)(_data)` call.  If the call fails (e.g., due to insufficient gas, or the target contract throwing an exception), the `execute` function will not be notified, and the transaction will appear to succeed, even though the intended action did not happen. This is a *critical* vulnerability.
+*   **Denial of Service:** The `execute` function could cause a denial of service if `_data` is crafted to consume excessive gas in the target contract.
+*   **Bad Randomness:** No random number generation is used.
+*   **Front-Running:** The `changeOwner` function *might* be susceptible to front-running. An attacker could observe a `changeOwner` transaction and submit their own transaction with the same `_newOwner`, but with a higher gas price, effectively stealing the ownership transfer.  This is a relatively minor issue, however.
+*   **Time Manipulation:** No apparent timestamp dependence.
+*   **Short Address Attack:** No obvious short address attack vulnerabilities.
+
+**Contract: `Marriage`**
+
+*   **Reentrancy:** The `sendMessage` function has a potential reentrancy issue. It calls `owner.transfer(this.balance);`. If the `owner` is a contract, and that contract has a `receive()` or `fallback()` function that calls back into the `Marriage` contract, it could re-enter and potentially drain the contract multiple times within a single transaction.
+*   **Access Control:** The `onlyOwner` modifier is used appropriately in `createMarriage`, `setStatus`, and `setMajorEvent`.  The `areMarried` modifier adds an extra layer of security.
+*   **Arithmetic Issues:** No apparent arithmetic overflows or underflows.
+*   **Unchecked Return Values For Low Level Calls:** The `sendMessage` function uses `owner.transfer(this.balance);`.  `transfer()` reverts on failure, which prevents silent failing sends.
+*   **Denial of Service:** A malicious user could potentially send a very long string in `nameFrom`, `text`, or `url` within the `sendMessage` function, consuming significant gas and potentially blocking legitimate users. The arrays `majorEvents` and `messages` could also grow unbounded, leading to out-of-gas errors.
+*   **Bad Randomness:** No random number generation is used.
+*   **Front-Running:** No obvious front-running vulnerabilities, although seeing the parameters used in `createMarriage` might allow someone to create a similar marriage contract.
+*   **Time Manipulation:** The contract uses `now` for the `marriageDate` and event dates. While `now` is technically the block timestamp, for most practical purposes, this is acceptable in this context.  It's worth noting that miners can manipulate the timestamp to a small degree.
+*   **Short Address Attack:** No obvious short address attack vulnerabilities.
+
+**Summary of Vulnerabilities:**
+
+*   **Critical: Unchecked Return Value in `Owned.execute`:**  The lack of error handling after the low-level call makes this function very dangerous.
+*   **High: Reentrancy in `Marriage.sendMessage`:** The call to `owner.transfer` allows for a reentrancy attack if the owner is a malicious contract.
+*   **Medium: Potential DoS in `Marriage`:**  Unbounded arrays (`majorEvents`, `messages`) and long strings could lead to denial of service.
+*   **Low: Front-Running of `Owned.changeOwner`:**  Possible front-running of ownership transfer.
+
+**Recommendations:**
+
+1.  **`Owned.execute`:** *Always* check the return value of low-level calls.  Modify the `execute` function to check the return value and revert the transaction if the call fails.  Example:
+
+    ```solidity
+    function execute(address _dst, uint _value, bytes _data) onlyOwner {
+        bool success;
+        assembly {
+            success := call(gas, _dst, _value, add(_data, 0x20), mload(_data), 0, 0)
+        }
+        require(success);
+    }
+    ```
+
+2.  **`Marriage.sendMessage`:**  *Mitigate Reentrancy*.  Instead of directly transferring funds, consider using a "withdraw" pattern where the owner must explicitly call a function to withdraw the funds. Alternatively, use a reentrancy guard like `ReentrancyGuard` from OpenZeppelin. Example:
+
+    ```solidity
+    // import "openzeppelin-solidity/contracts/utils/ReentrancyGuard.sol";
+
+    // contract Marriage is Owned, ReentrancyGuard {
+    // ...
+
+    function sendMessage(string nameFrom, string text, string url) payable areMarried {
+        // require(msg.value > 0); //Don't require a value to send a message
+        // owner.transfer(this.balance); //Remove this, and add a withdraw pattern.
+        messages.push(Message(now, nameFrom, text, url, msg.value));
+        MessageSent(nameFrom, text, url, msg.value);
+    }
+
+    function withdraw() onlyOwner {
+        uint amount = address(this).balance;
+        owner.transfer(amount);
+    }
+    // }
+
+    ```
+
+3.  **`Marriage` (DoS):** *Limit array sizes and string lengths*.  Implement restrictions on the length of strings (e.g., `require(_partner1.length() <= MAX_STRING_LENGTH);`) and consider capping the maximum number of elements in the `majorEvents` and `messages` arrays. Also consider pagination for the `majorEvents` and `messages` arrays.
+
+4.  **`Owned.changeOwner`:** While the impact is relatively low, consider implementing a delay before the new owner can accept ownership, giving the current owner a chance to revert the change if they were front-run.

@@ -1,0 +1,156 @@
+Okay, let's carefully analyze the `EtherBank` smart contract for the nine common vulnerabilities you've listed.
+
+## Smart Contract: EtherBank
+
+```solidity
+pragma solidity ^0.4.0;
+contract EtherBank{
+    mapping (address => uint) userBalances;
+    function getBalance(address user) constant returns(uint) {  
+		return userBalances[user];
+	}
+
+	function addToBalance() {  
+		userBalances[msg.sender] += msg.value;
+	}
+
+	function withdrawBalance() {  
+		uint amountToWithdraw = userBalances[msg.sender];
+        
+		if (!(msg.sender.call.value(amountToWithdraw)())) { throw; }
+		userBalances[msg.sender] = 0;
+	}    
+}
+```
+
+### Vulnerability Analysis:
+
+---
+
+### 1. Reentrancy: **VULNERABLE**
+
+The `withdrawBalance()` function is critically vulnerable to reentrancy.
+
+**Explanation:**
+The contract first reads the `amountToWithdraw` from `userBalances[msg.sender]`, then makes an external call to `msg.sender.call.value(amountToWithdraw)()`, and *only after* this call does it update the `userBalances[msg.sender]` to 0.
+
+An attacker can create a malicious contract that does the following:
+1.  Deposits some Ether into `EtherBank`.
+2.  Calls `EtherBank.withdrawBalance()`.
+3.  When `EtherBank` executes `msg.sender.call.value(amountToWithdraw)()`, it sends Ether to the attacker's contract.
+4.  The attacker's contract, in its `fallback` or `receive` function (which is executed upon receiving Ether), immediately calls `EtherBank.withdrawBalance()` again.
+5.  Since `userBalances[msg.sender]` has not yet been set to `0` in the *first* transaction context, the `amountToWithdraw` in the *second* call will still be the original balance.
+6.  This process can be repeated, allowing the attacker to drain the `EtherBank` contract of all its Ether, up to `N` times their original deposit, where `N` is limited by the gas available for the transaction or the total Ether in the bank.
+
+**Example Attack Flow:**
+*   Attacker deposits 1 ETH. `userBalances[Attacker] = 1 ETH`.
+*   Attacker calls `withdrawBalance()`.
+*   Inside `withdrawBalance()`:
+    *   `amountToWithdraw` is set to 1 ETH.
+    *   `msg.sender.call.value(1 ETH)()` is executed, sending 1 ETH to Attacker.
+    *   Attacker's contract receives 1 ETH, and its `fallback` function is triggered.
+    *   **Inside Attacker's `fallback`:** Attacker immediately calls `withdrawBalance()` again.
+        *   Inside this *nested* `withdrawBalance()` call:
+            *   `amountToWithdraw` is *still* 1 ETH (because `userBalances[Attacker]` hasn't been set to 0 yet by the first call).
+            *   `msg.sender.call.value(1 ETH)()` is executed, sending another 1 ETH to Attacker.
+            *   Attacker's `fallback` function could call `withdrawBalance()` again, and so on...
+    *   Eventually, if the attacker chooses to stop or runs out of gas, the nested calls unwind.
+    *   The initial `withdrawBalance()` call finishes, and `userBalances[Attacker]` is set to 0.
+
+---
+
+### 2. Access Control: **NOT VULNERABLE (directly, but Reentrancy is an indirect access issue)**
+
+The contract's functions mostly operate on the `msg.sender`'s own balance, which is a correct access control pattern.
+
+*   `getBalance()`: Public, allows anyone to check any balance. This is acceptable for a public bank.
+*   `addToBalance()`: Public, allows anyone to add to their *own* balance. Correct.
+*   `withdrawBalance()`: Public, allows `msg.sender` to withdraw their *own* balance. Correct in principle.
+
+While the fundamental design for *who can access what* is okay, the reentrancy vulnerability (see point 1) effectively creates an *unauthorized repeated access* to funds that should have been restricted to a single withdrawal, thus becoming an indirect access control breach.
+
+---
+
+### 3. Arithmetic Issues: **VULNERABLE (Integer Overflow)**
+
+The `addToBalance()` function is vulnerable to an integer overflow.
+
+**Explanation:**
+`userBalances[msg.sender] += msg.value;`
+
+In Solidity versions `^0.4.0` (which this contract uses), `uint` types do *not* automatically check for overflow or underflow. If a user's `userBalances[msg.sender]` is already a very large number close to `uint_MAX` (2^256 - 1), and they then call `addToBalance()` with a non-zero `msg.value`, the sum can exceed `uint_MAX`. This will cause the `userBalances[msg.sender]` to "wrap around" to a small number, effectively losing a significant portion of the user's funds.
+
+**Example Attack/Scenario:**
+*   A user accumulates `(2^256 - 100)` Wei in their balance.
+*   They call `addToBalance()` with `msg.value = 200` Wei.
+*   `userBalances[msg.sender]` becomes `(2^256 - 100) + 200 = 2^256 + 100`.
+*   Due to overflow, `userBalances[msg.sender]` wraps around and becomes `100` Wei, causing the loss of the accumulated funds.
+
+---
+
+### 4. Unchecked Return Values For Low Level Calls: **NOT VULNERABLE**
+
+The contract uses `call.value()` for the external transfer in `withdrawBalance()`.
+
+**Explanation:**
+The `withdrawBalance()` function explicitly checks the return value of the low-level `call` function:
+`if (!(msg.sender.call.value(amountToWithdraw)())) { throw; }`
+
+If the `call` fails (e.g., due to the recipient being a contract without a payable fallback function, or running out of gas), the transaction is reverted (`throw`). This prevents the contract from proceeding with the state update (`userBalances[msg.sender] = 0;`) if the transfer didn't succeed, which is the correct way to handle it.
+
+---
+
+### 5. Denial of Service: **PARTIALLY VULNERABLE (DoS on withdrawal)**
+
+**Explanation:**
+In `withdrawBalance()`, if the `msg.sender` (who is withdrawing) is a malicious contract, they could intentionally make their `fallback` or `receive` function revert (e.g., by always calling `revert()` or `throw`), or consume excessive gas.
+
+*   **Intentional Revert:** If the attacker's `fallback`/`receive` function always reverts, the `msg.sender.call.value(...)()` will return `false`, triggering the `throw`. This means the attacker's withdrawal transaction will always fail, and `userBalances[msg.sender]` will never be set to 0. While the attacker doesn't lose funds, they also can't successfully withdraw or clear their balance. This is a DoS on the ability to withdraw for a specific user. It can also be part of a reentrancy attack strategy to keep the balance non-zero.
+*   **Gas Limit:** If the attacker's `fallback`/`receive` function consumes too much gas, the `call.value()` will fail due to an out-of-gas error. This also triggers the `throw`, reverting the transaction and consuming the gas of the original `withdrawBalance` caller. Again, a DoS on withdrawal for that user.
+
+This doesn't typically affect the *entire* contract for *all* users (like the `King of the Hill` pattern), but it specifically impacts the ability of the malicious user to complete their withdrawal.
+
+---
+
+### 6. Bad Randomness: **NOT VULNERABLE**
+
+The contract does not involve any randomness, pseudo-randomness, or operations that require unpredictable outcomes. Therefore, it is not vulnerable to bad randomness issues.
+
+---
+
+### 7. Front-Running: **NOT VULNERABLE (Low impact)**
+
+Front-running typically applies to actions where transaction order can be exploited (e.g., auctions, first-to-claim patterns).
+
+**Explanation:**
+This contract's functions (`addToBalance`, `withdrawBalance`) are individual actions for each user's balance. There isn't an observable, shared state that a front-runner could exploit to gain an advantage over *another* user. A user could technically "front-run" their own pending transactions if they submitted multiple, but this isn't the typical security concern associated with front-running.
+
+---
+
+### 8. Time Manipulation: **NOT VULNERABLE**
+
+The contract does not use `block.timestamp` or `block.number` to make critical decisions or influence transaction outcomes. Therefore, it is not vulnerable to time manipulation attacks.
+
+---
+
+### 9. Short Address Attack: **NOT VULNERABLE (Contract-side)**
+
+This vulnerability primarily affects client-side applications or poorly implemented `transfer()` calls that take an `address` as an argument and might implicitly pad it.
+
+**Explanation:**
+*   `getBalance(address user)`: This is a view function. Even if a short address were passed, it would simply return the balance for that (potentially wrong) address; it doesn't manipulate funds.
+*   `addToBalance()` and `withdrawBalance()`: These functions rely on `msg.sender` for authentication and the recipient of `call.value()`. `msg.sender` is a system variable and is always a full 20-byte address, making it immune to short address attacks.
+
+The contract itself does not implement a `transfer(address _to, uint _amount)` type of function that could be exploited by a client-side short address vulnerability.
+
+---
+
+## Summary of Vulnerabilities:
+
+The `EtherBank` contract, typical of early Solidity examples, contains **critical vulnerabilities**:
+
+1.  **Reentrancy:** Allows attackers to drain the contract by repeatedly calling `withdrawBalance` before the balance is zeroed.
+2.  **Arithmetic Issues (Integer Overflow):** In `addToBalance()`, users can lose funds if their balance overflows the `uint` maximum.
+3.  **Denial of Service (on withdrawal):** Malicious recipients can prevent successful withdrawals, leaving funds stuck (though not lost from the bank).
+
+It's crucial to implement **best practices** such as Checks-Effects-Interactions pattern, using OpenZeppelin's SafeMath library for arithmetic, and considering reentrancy guards or upgradable contracts.

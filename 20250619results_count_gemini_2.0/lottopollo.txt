@@ -1,0 +1,11 @@
+Here's a breakdown of the vulnerabilities based on your provided analysis:
+
+1. **Reentrancy:** 1 (Potentially in `payOut` due to `msg.sender.send()` and `leader.send()`, even though you've commented out a reentrancy guard, the underlying vulnerability remains.)
+2. **Access Control:** 0 (No critical issues, but the leader assignment logic warrants further review.)
+3. **Arithmetic Issues:** 0 (Low risk due to the compiler version and lack of explicit arithmetic operations prone to overflow/underflow. The commented-out SafeMath library further mitigates this.)
+4. **Unchecked Return Values For Low Level Calls:** 1 (`msg.sender.send()` and `leader.send()` lack checks.)
+5. **Denial of Service:** 1 (Potential gas limit issues in `payOut` and state corruption from unchecked `send()` failures.)
+6. **Bad Randomness:** 1 (`block.timestamp` is used.)
+7. **Front-Running:** 1 (Vulnerable due to `block.timestamp` dependence.)
+8. **Time Manipulation:** 1 (Relies heavily on `block.timestamp` and `now`.)
+9. **Short Address Attack:** 0 (Low risk)

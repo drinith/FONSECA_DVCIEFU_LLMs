@@ -1,0 +1,25 @@
+Here's a breakdown of the vulnerabilities using 0 and 1:
+
+**MultiOwnable Contract:**
+
+1. Reentrancy: 0
+2. Access Control: 1
+3. Arithmetic Issues: 0
+4. Unchecked Return Values For Low Level Calls: 0
+5. Denial of Service: 1
+6. Bad Randomness: 0
+7. Front-Running: 0
+8. Time Manipulation: 0
+9. Short Address Attack: 0
+
+**TestContract:**
+
+1. Reentrancy: 1
+2. Access Control: 0
+3. Arithmetic Issues: 0
+4. Unchecked Return Values For Low Level Calls: 0
+5. Denial of Service: 1
+6. Bad Randomness: 0
+7. Front-Running: 0
+8. Time Manipulation: 0
+9. Short Address Attack: 0
