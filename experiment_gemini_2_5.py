@@ -42,7 +42,7 @@ configurar_gemini()
 # =================================================================
 
 # Lista de arquivos já processados
-xx = os.listdir("./results_gemini_teste/")
+xx = os.listdir("./results_gemini_teste_2_5/")
 xxx = [i[:-4] + '.sol' for i in xx]
 filenames = list(set(os.listdir("./smartbugs-curated/dataset/processed")) - set(xxx))
 position_file = 0
@@ -151,7 +151,7 @@ while position_file < len(filenames):
 
     if res:
         print("success, outputting...")
-        with open('./results_gemini_teste/' + filename[:-4] + '.txt', 'w') as f:
+        with open('./results_gemini_teste_2_5/' + filename[:-4] + '.txt', 'w') as f:
             f.write(res)
         time.sleep(REQUEST_DELAY)  # Delay para respeitar o RPM da conta
     else:
