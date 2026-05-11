@@ -8,10 +8,6 @@ O que este código faz:
     (os dois modelos recebem EXATAMENTE os mesmos arquivos sorteados em cada
     iteração). Calcula a distribuição da diferença F1(GPT-4) − F1(Gemini) e
     extrai o p-value bilateral e os IC95% de cada modelo.
-
-    O F1 reportado como valor pontual é o F1 OBSERVADO (calculado diretamente
-    sobre todos os dados reais, sem reamostragem). O bootstrap é usado apenas
-    para gerar os IC95% e o p-value.
  
     p-value = proporção de reamostras em que F1(GPT-4) <= F1(Gemini)
     (unilateral: H1 = GPT-4 > Gemini)
@@ -106,14 +102,21 @@ def bootstrap_paired(df_gemini, df_gpt4, n=N_BOOTSTRAP):
     """
     Bootstrap PAREADO: em cada iteração sorteia-se o MESMO conjunto de
     índices de arquivo para os dois modelos.
-
+ 
+    Por que pareado?
+    ─────────────────
+    Queremos medir se GPT-4 É MELHOR QUE Gemini, não se cada um é bom
+    isoladamente. Se sorteássemos índices independentes, uma diferença
+    observada poderia vir apenas do acaso dos sorteios — não do modelo.
+    Com o mesmo sorteio, a única fonte de variação é o desempenho de cada
+    modelo naqueles contratos, que é exatamente o que queremos comparar.
+ 
     Retorna
     ───────
-    obs_g  : F1 observado do Gemini (calculado sobre todos os dados, sem reamostragem)
-    obs_g4 : F1 observado do GPT-4
-    f1_g   : array (n,) com F1 do Gemini em cada reamostra (para IC95% e p-value)
-    f1_g4  : array (n,) com F1 do GPT-4 em cada reamostra
+    f1_g  : array (n,) com F1 do Gemini em cada reamostra
+    f1_g4 : array (n,) com F1 do GPT-4 em cada reamostra
     """
+    # Alinha os DataFrames pelo arquivo (union dos arquivos avaliados)
     todos = sorted(set(df_gemini['arquivo']) | set(df_gpt4['arquivo']))
     idx_map = {a: i for i, a in enumerate(todos)}
     N = len(todos)
@@ -132,21 +135,18 @@ def bootstrap_paired(df_gemini, df_gpt4, n=N_BOOTSTRAP):
  
     tp_g,  fp_g,  gab_g  = to_arrays(df_gemini)
     tp_g4, fp_g4, gab_g4 = to_arrays(df_gpt4)
-
-    # F1 observado: calculado diretamente sobre todos os dados reais
-    obs_g  = f1_from_arrays(tp_g,  fp_g,  gab_g)
-    obs_g4 = f1_from_arrays(tp_g4, fp_g4, gab_g4)
-
-    # Reamostras para IC95% e p-value
+ 
     f1_g  = np.zeros(n)
     f1_g4 = np.zeros(n)
  
     for b in range(n):
+        # MESMO sorteio para os dois modelos
         idx = np.random.choice(N, N, replace=True)
+ 
         f1_g[b]  = f1_from_arrays(tp_g[idx],  fp_g[idx],  gab_g[idx])
         f1_g4[b] = f1_from_arrays(tp_g4[idx], fp_g4[idx], gab_g4[idx])
  
-    return obs_g, obs_g4, f1_g, f1_g4
+    return f1_g, f1_g4
  
  
 # ── Carregamento ──────────────────────────────────────────────────────────────
@@ -175,31 +175,33 @@ for v in VULNS:
     df_gem_files = build_per_file(gemini_tp, gemini_fp, df_gab_raw, v)
     df_g4_files  = build_per_file(gpt4_tp,   gpt4_fp,  df_gab_raw, v)
  
-    obs_g, obs_g4, f1_g, f1_g4 = bootstrap_paired(df_gem_files, df_g4_files)
-
-    # F1 observado em %
-    obs_g  *= 100
-    obs_g4 *= 100
-
-    # IC95% via bootstrap
-    lo_g,  hi_g  = np.percentile(f1_g,  [2.5, 97.5]) * 100
-    lo_g4, hi_g4 = np.percentile(f1_g4, [2.5, 97.5]) * 100
+    f1_g, f1_g4 = bootstrap_paired(df_gem_files, df_g4_files)
+ 
+    # Métricas resumo
+    m_g,  lo_g,  hi_g  = (np.mean(f1_g)*100,
+                           np.percentile(f1_g,  2.5)*100,
+                           np.percentile(f1_g, 97.5)*100)
+    m_g4, lo_g4, hi_g4 = (np.mean(f1_g4)*100,
+                           np.percentile(f1_g4,  2.5)*100,
+                           np.percentile(f1_g4, 97.5)*100)
  
     # p-value unilateral: H1 = GPT-4 > Gemini
+    # "Em quantas reamostras GPT-4 NÃO foi melhor?"
     p_val = float((f1_g4 <= f1_g).mean())
+ 
     sig = "*" if p_val < ALPHA else ""
  
     print(f"{v:<22} "
-          f"{obs_g:>10.1f} [{lo_g:>5.1f}; {hi_g:>5.1f}]  "
-          f"{obs_g4:>10.1f} [{lo_g4:>5.1f}; {hi_g4:>5.1f}]  "
+          f"{m_g:>10.1f} [{lo_g:>5.1f}; {hi_g:>5.1f}]  "
+          f"{m_g4:>10.1f} [{lo_g4:>5.1f}; {hi_g4:>5.1f}]  "
           f"{p_val:>7.3f}  {sig:>4}")
  
     resultados.append({
         'vulnerabilidade': v,
-        'f1_gemini': round(obs_g, 1),
+        'f1_gemini': round(m_g, 1),
         'ic95_gem_inf': round(lo_g, 1),
         'ic95_gem_sup': round(hi_g, 1),
-        'f1_gpt4': round(obs_g4, 1),
+        'f1_gpt4': round(m_g4, 1),
         'ic95_g4_inf': round(lo_g4, 1),
         'ic95_g4_sup': round(hi_g4, 1),
         'p_valor': round(p_val, 3),
